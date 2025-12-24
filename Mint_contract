@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+interface IDeHelpNFT {
+    function mint(address to, uint256 level) external returns (uint256);
+}
+
+interface IReferralRegistry {
+    function bindSponsor(uint256 tokenId, uint256 sponsorTokenId) external;
+}
+
+interface IDistributionController {
+    function split(uint256 amount) external view returns (
+        uint256 referralAmount,
+        uint256 poolAmount,
+        uint256 partnerAmount,
+        uint256 treasuryAmount
+    );
+}
+
+interface IRevenuePool {
+    function addShares(uint256 tokenId, uint256 shares) external;
+    function deposit(uint256 amount) external;
+}
+
+interface IPartnerVault {
+    function addOrUpdatePartner(address partner, uint256 shares) external;
+    function deposit(uint256 amount) external;
+}
+
+contract SaleMintController is AccessControl, ReentrancyGuard, Pausable {
+    using SafeERC20 for IERC20;
+
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+
+    IERC20 public usdt;
+    IDeHelpNFT public nft;
+    IReferralRegistry public referralRegistry;
+    IDistributionController public distController;
+    IRevenuePool public revenuePool;
+    IPartnerVault public partnerVault;
+    address public treasury;
+
+    uint256 public basePrice;
+    uint256 public ownerFee;
+    uint256 public defaultSharesPerNFT = 1;
+
+    event Minted(address indexed buyer, uint256 tokenId, uint256 level);
+    event TreasuryFunded(address indexed treasury, uint256 amount);
+
+    constructor(
+        address admin,
+        address usdtAddress,
+        address nftAddress,
+        address referralAddress,
+        address distAddress,
+        address revenueAddress,
+        address partnerVaultAddress,
+        address treasuryAddress,
+        uint256 _basePrice,
+        uint256 _ownerFee
+    ) {
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(MINTER_ROLE, admin);
+
+        usdt = IERC20(usdtAddress);
+        nft = IDeHelpNFT(nftAddress);
+        referralRegistry = IReferralRegistry(referralAddress);
+        distController = IDistributionController(distAddress);
+        revenuePool = IRevenuePool(revenueAddress);
+        partnerVault = IPartnerVault(partnerVaultAddress);
+        treasury = treasuryAddress;
+
+        basePrice = _basePrice;
+        ownerFee = _ownerFee;
+    }
+
+    // ------------------------
+    // Mint
+    // ------------------------
+    function mint(
+        uint256 level,
+        uint256 sponsorTokenId
+    ) external whenNotPaused nonReentrant {
+        uint256 totalPrice = basePrice + ownerFee;
+
+        // Перевод USDT
+        usdt.safeTransferFrom(msg.sender, address(this), totalPrice);
+
+        // 1️⃣ Mint NFT
+        uint256 tokenId = nft.mint(msg.sender, level);
+
+        // 2️⃣ Bind sponsor (если есть)
+        if (sponsorTokenId != 0) {
+            referralRegistry.bindSponsor(tokenId, sponsorTokenId);
+        }
+
+        // 3️⃣ Split funds
+        (uint256 referralAmt, uint256 poolAmt, uint256 partnerAmt, uint256 treasuryAmt) =
+            distController.split(totalPrice);
+
+        if (referralAmt > 0) {
+            usdt.safeTransfer(address(referralRegistry), referralAmt);
+        }
+
+        if (poolAmt > 0) {
+            usdt.safeTransfer(address(revenuePool), poolAmt);
+            revenuePool.deposit(poolAmt);
+            revenuePool.addShares(tokenId, defaultSharesPerNFT);
+        }
+
+        if (partnerAmt > 0) {
+            usdt.safeTransfer(address(partnerVault), partnerAmt);
+            partnerVault.deposit(partnerAmt);
+            partnerVault.addOrUpdatePartner(msg.sender, defaultSharesPerNFT);
+        }
+
+        if (treasuryAmt > 0) {
+            usdt.safeTransfer(treasury, treasuryAmt);
+            emit TreasuryFunded(treasury, treasuryAmt);
+        }
+
+        emit Minted(msg.sender, tokenId, level);
+    }
+
+    // ------------------------
+    // Admin
+    // ------------------------
+    function setPrices(uint256 _basePrice, uint256 _ownerFee)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(_basePrice > 0 && _ownerFee > 0, "Invalid amounts");
+        basePrice = _basePrice;
+        ownerFee = _ownerFee;
+    }
+
+    function setTreasury(address newTreasury)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(newTreasury != address(0), "Invalid address");
+        treasury = newTreasury;
+    }
+
+    function setDefaultSharesPerNFT(uint256 shares)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(shares > 0, "Shares must be > 0");
+        defaultSharesPerNFT = shares;
+    }
+
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+}
