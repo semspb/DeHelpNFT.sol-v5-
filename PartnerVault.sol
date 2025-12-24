@@ -6,6 +6,11 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+/**
+ * @title PartnerVault
+ * @notice Partner pool distribution system
+ * Partners are users who have minted PARTNER_MIN_MINTS (10) or more NFTs
+ */
 contract PartnerVault is
     AccessControl,
     ReentrancyGuard,
@@ -18,6 +23,12 @@ contract PartnerVault is
     IERC20 public immutable usdt;
 
     uint256 public constant ACC_PRECISION = 1e18;
+    
+    /// @dev Minimum mints to become a partner (from Marketing)
+    uint256 public constant PARTNER_MIN_MINTS = 10;
+    
+    /// @dev Maximum levels to climb when searching for active sponsor
+    uint256 public constant MAX_LEVELS_TO_CLIMB = 10;
 
     // --- Global state ---
     uint256 public accRewardPerShare;
@@ -26,6 +37,7 @@ contract PartnerVault is
     struct Partner {
         uint256 shares;
         uint256 rewardDebt;
+        uint256 mintCount;  // Track number of mints
     }
 
     /// @dev partner address => Partner data
@@ -37,6 +49,7 @@ contract PartnerVault is
     // --- Events ---
     event PartnerAdded(address indexed partner, uint256 shares);
     event PartnerSharesUpdated(address indexed partner, uint256 shares);
+    event MintCountUpdated(address indexed partner, uint256 mintCount);
     event Deposit(uint256 amount);
     event Harvest(address indexed partner, uint256 amount);
     event Claimed(address indexed partner, uint256 amount);
@@ -61,7 +74,7 @@ contract PartnerVault is
         uint256 shares
     )
         external
-        onlyRole(DEFAULT_ADMIN_ROLE)
+        onlyRole(OPERATOR_ROLE)
         whenNotPaused
     {
         require(partner != address(0), "Zero address");
@@ -78,6 +91,36 @@ contract PartnerVault is
             (p.shares * accRewardPerShare) / ACC_PRECISION;
 
         emit PartnerSharesUpdated(partner, shares);
+    }
+    
+    /**
+     * @notice Increment mint count for a partner
+     * @dev Called when a user mints an NFT
+     */
+    function incrementMintCount(address partner)
+        external
+        onlyRole(OPERATOR_ROLE)
+    {
+        require(partner != address(0), "Zero address");
+        
+        Partner storage p = partners[partner];
+        p.mintCount++;
+        
+        emit MintCountUpdated(partner, p.mintCount);
+    }
+    
+    /**
+     * @notice Check if address is a partner (has >= PARTNER_MIN_MINTS)
+     */
+    function isPartner(address user) external view returns (bool) {
+        return partners[user].mintCount >= PARTNER_MIN_MINTS;
+    }
+    
+    /**
+     * @notice Get partner mint count
+     */
+    function getMintCount(address user) external view returns (uint256) {
+        return partners[user].mintCount;
     }
 
     // ----------------------------------------------------
