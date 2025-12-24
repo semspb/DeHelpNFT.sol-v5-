@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
+contract DeHelpNFTv2 is ERC721Upgradeable, AccessControlUpgradeable, UUPSUpgradeable {
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+
+    uint256 public nextTokenId;
+
+    address public revenuePool;
+
+    struct NFTData {
+        uint256 mintTimestamp;
+        uint256 level;
+    }
+
+    mapping(uint256 => NFTData) public nftData;
+
+    function initialize(address admin, address _revenuePool) public initializer {
+        __ERC721_init("DeHelp NFT", "DHELP");
+        __AccessControl_init();
+        __UUPSUpgradeable_init();
+
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        revenuePool = _revenuePool;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
+}
