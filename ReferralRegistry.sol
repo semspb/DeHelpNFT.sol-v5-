@@ -11,7 +11,7 @@ contract ReferralRegistry is AccessControl {
 
     bytes32 public constant BINDER_ROLE = keccak256("BINDER_ROLE");
 
-    uint256 public constant MAX_DEPTH = 11;
+    uint256 public constant MAX_DEPTH = 7;
 
     IDeHelpNFT public immutable nft;
 
