@@ -18,8 +18,7 @@ interface IDistributionController {
     function split(uint256 amount) external view returns (
         uint256 referralAmount,
         uint256 poolAmount,
-        uint256 partnerAmount,
-        uint256 treasuryAmount
+        uint256 reserveAmount
     );
 }
 
@@ -28,29 +27,54 @@ interface IRevenuePool {
     function deposit(uint256 amount) external;
 }
 
-interface IPartnerVault {
-    function addOrUpdatePartner(address partner, uint256 shares) external;
-    function deposit(uint256 amount) external;
+interface IReferralRewards {
+    function distributeRewards(uint256 tokenId, uint256 amount) external;
 }
 
+/**
+ * @title SaleMintController
+ * @notice Контроллер минта NFT с интеграцией реферальной системы
+ * Распределение средств:
+ * - 92% на реферальные награды (7 уровней)
+ * - 7% в партнерский пул
+ * - 1% в резерв/казну
+ */
 contract SaleMintController is AccessControl, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    bytes32 public constant CONFIG_ROLE = keccak256("CONFIG_ROLE");
 
     IERC20 public usdt;
     IDeHelpNFT public nft;
     IReferralRegistry public referralRegistry;
     IDistributionController public distController;
     IRevenuePool public revenuePool;
-    IPartnerVault public partnerVault;
+    IReferralRewards public referralRewards;
     address public treasury;
 
     uint256 public basePrice;
-    uint256 public ownerFee;
     uint256 public defaultSharesPerNFT = 1;
+    
+    // Partner system constants from Marketing
+    uint256 public constant PARTNER_MIN_MINTS = 10;
+    uint256 public constant MAX_LEVELS_TO_CLIMB = 10;
+    
+    // Tracking user mints for partner status
+    mapping(address => uint256) public userMintCount;
 
-    event Minted(address indexed buyer, uint256 tokenId, uint256 level);
+    event Minted(
+        address indexed buyer,
+        uint256 tokenId,
+        uint256 level,
+        uint256 price
+    );
+    
+    event PartnerStatusAchieved(
+        address indexed user,
+        uint256 mintCount
+    );
+    
     event TreasuryFunded(address indexed treasury, uint256 amount);
 
     constructor(
@@ -60,84 +84,110 @@ contract SaleMintController is AccessControl, ReentrancyGuard, Pausable {
         address referralAddress,
         address distAddress,
         address revenueAddress,
-        address partnerVaultAddress,
+        address referralRewardsAddress,
         address treasuryAddress,
-        uint256 _basePrice,
-        uint256 _ownerFee
+        uint256 _basePrice
     ) {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(MINTER_ROLE, admin);
+        _grantRole(CONFIG_ROLE, admin);
 
         usdt = IERC20(usdtAddress);
         nft = IDeHelpNFT(nftAddress);
         referralRegistry = IReferralRegistry(referralAddress);
         distController = IDistributionController(distAddress);
         revenuePool = IRevenuePool(revenueAddress);
-        partnerVault = IPartnerVault(partnerVaultAddress);
+        referralRewards = IReferralRewards(referralRewardsAddress);
         treasury = treasuryAddress;
 
         basePrice = _basePrice;
-        ownerFee = _ownerFee;
     }
 
     // ------------------------
     // Mint
     // ------------------------
+    /**
+     * @notice Минт NFT с автоматическим распределением средств
+     * @param level Уровень NFT
+     * @param sponsorTokenId ID спонсорского NFT (0 если нет спонсора)
+     */
     function mint(
         uint256 level,
         uint256 sponsorTokenId
     ) external whenNotPaused nonReentrant {
-        uint256 totalPrice = basePrice + ownerFee;
+        uint256 totalPrice = basePrice;
 
         // Перевод USDT
         usdt.safeTransferFrom(msg.sender, address(this), totalPrice);
 
         // 1️⃣ Mint NFT
         uint256 tokenId = nft.mint(msg.sender, level);
+        
+        // Track mint count for partner status
+        userMintCount[msg.sender]++;
+        if (userMintCount[msg.sender] == PARTNER_MIN_MINTS) {
+            emit PartnerStatusAchieved(msg.sender, PARTNER_MIN_MINTS);
+        }
 
         // 2️⃣ Bind sponsor (если есть)
         if (sponsorTokenId != 0) {
             referralRegistry.bindSponsor(tokenId, sponsorTokenId);
         }
 
-        // 3️⃣ Split funds
-        (uint256 referralAmt, uint256 poolAmt, uint256 partnerAmt, uint256 treasuryAmt) =
+        // 3️⃣ Split funds according to distribution
+        (uint256 referralAmt, uint256 poolAmt, uint256 reserveAmt) =
             distController.split(totalPrice);
 
+        // 4️⃣ Distribute referral rewards (92% across 7 levels)
         if (referralAmt > 0) {
-            usdt.safeTransfer(address(referralRegistry), referralAmt);
+            usdt.approve(address(referralRewards), referralAmt);
+            referralRewards.distributeRewards(tokenId, referralAmt);
         }
 
+        // 5️⃣ Add to revenue pool (7%)
         if (poolAmt > 0) {
             usdt.safeTransfer(address(revenuePool), poolAmt);
             revenuePool.deposit(poolAmt);
             revenuePool.addShares(tokenId, defaultSharesPerNFT);
         }
 
-        if (partnerAmt > 0) {
-            usdt.safeTransfer(address(partnerVault), partnerAmt);
-            partnerVault.deposit(partnerAmt);
-            partnerVault.addOrUpdatePartner(msg.sender, defaultSharesPerNFT);
+        // 6️⃣ Send reserve to treasury (1%)
+        if (reserveAmt > 0) {
+            usdt.safeTransfer(treasury, reserveAmt);
+            emit TreasuryFunded(treasury, reserveAmt);
         }
 
-        if (treasuryAmt > 0) {
-            usdt.safeTransfer(treasury, treasuryAmt);
-            emit TreasuryFunded(treasury, treasuryAmt);
-        }
+        emit Minted(msg.sender, tokenId, level, totalPrice);
+    }
 
-        emit Minted(msg.sender, tokenId, level);
+    // ------------------------
+    // Views
+    // ------------------------
+    
+    /**
+     * @notice Проверить, является ли пользователь партнером
+     */
+    function isPartner(address user) external view returns (bool) {
+        return userMintCount[user] >= PARTNER_MIN_MINTS;
+    }
+    
+    /**
+     * @notice Получить количество минтов пользователя
+     */
+    function getMintCount(address user) external view returns (uint256) {
+        return userMintCount[user];
     }
 
     // ------------------------
     // Admin
     // ------------------------
-    function setPrices(uint256 _basePrice, uint256 _ownerFee)
+    
+    function setBasePrice(uint256 _basePrice)
         external
-        onlyRole(DEFAULT_ADMIN_ROLE)
+        onlyRole(CONFIG_ROLE)
     {
-        require(_basePrice > 0 && _ownerFee > 0, "Invalid amounts");
+        require(_basePrice > 0, "Invalid price");
         basePrice = _basePrice;
-        ownerFee = _ownerFee;
     }
 
     function setTreasury(address newTreasury)
@@ -150,10 +200,18 @@ contract SaleMintController is AccessControl, ReentrancyGuard, Pausable {
 
     function setDefaultSharesPerNFT(uint256 shares)
         external
-        onlyRole(DEFAULT_ADMIN_ROLE)
+        onlyRole(CONFIG_ROLE)
     {
         require(shares > 0, "Shares must be > 0");
         defaultSharesPerNFT = shares;
+    }
+    
+    function setReferralRewards(address newReferralRewards)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(newReferralRewards != address(0), "Invalid address");
+        referralRewards = IReferralRewards(newReferralRewards);
     }
 
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
