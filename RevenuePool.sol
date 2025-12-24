@@ -118,4 +118,83 @@ contract RevenuePool is
     }
 
     /// @dev harvest rewards for a specific NFT
-    function harvest(uint
+    function harvest(uint256 tokenId)
+        external
+        nonReentrant
+    {
+        address owner = nft.ownerOf(tokenId);
+        require(owner == msg.sender, "Not owner");
+
+        _harvestToPending(tokenId, owner);
+    }
+
+    // ----------------------------------------------------
+    // NFT transfer hook (called by NFT contract)
+    // ----------------------------------------------------
+
+    function onNFTTransfer(
+        uint256 tokenId,
+        address from,
+        address to
+    )
+        external
+        whenNotPaused
+    {
+        require(msg.sender == address(nft), "Only NFT");
+
+        // close rewards for previous owner
+        _harvestToPending(tokenId, from);
+
+        // reset debt for new owner
+        Position storage p = positions[tokenId];
+        p.rewardDebt = (p.shares * accRewardPerShare) / ACC_PRECISION;
+
+        emit NFTTransferred(tokenId, from, to);
+    }
+
+    // ----------------------------------------------------
+    // Internal logic
+    // ----------------------------------------------------
+
+    function _harvestToPending(
+        uint256 tokenId,
+        address to
+    ) internal {
+        Position storage p = positions[tokenId];
+        if (p.shares == 0) return;
+
+        uint256 accumulated =
+            (p.shares * accRewardPerShare) / ACC_PRECISION;
+
+        uint256 reward =
+            accumulated > p.rewardDebt
+                ? accumulated - p.rewardDebt
+                : 0;
+
+        if (reward > 0) {
+            pending[to] += reward;
+        }
+
+        p.rewardDebt = accumulated;
+
+        emit Harvest(tokenId, to, reward);
+    }
+
+    // ----------------------------------------------------
+    // Emergency & admin
+    // ----------------------------------------------------
+
+    function pause()
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        _pause();
+    }
+
+    function unpause()
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        _unpause();
+    }
+}
